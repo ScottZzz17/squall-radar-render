@@ -17,6 +17,9 @@ import { prepareHrrr, renderTile, type HrrrField } from "./lib/hrrr.ts";
 const HRRR_BASE = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com";
 const ZOOM_MIN = Number(process.env.ZOOM_MIN ?? 3);
 const ZOOM_MAX = Number(process.env.ZOOM_MAX ?? 6);
+// The 18→24h synoptic tail is coarse/far-out, so render it at a lower zoom to
+// keep R2 writes inside the free tier (the app over-zoom-upscales it anyway).
+const SYNOPTIC_ZOOM_MAX = Number(process.env.SYNOPTIC_ZOOM_MAX ?? 4);
 // CONUS bounding box (a little generous) for tile enumeration.
 const CONUS = { west: -125, east: -66, south: 23, north: 51 };
 const SUBHOURLY_MIN = [15, 30, 45, 60, 75, 90, 105, 120];
@@ -65,6 +68,22 @@ async function latestRun(): Promise<string | null> {
     const ymd = t.toISOString().slice(0, 10).replace(/-/g, "");
     const hh = String(t.getUTCHours()).padStart(2, "0");
     const url = `${HRRR_BASE}/hrrr.${ymd}/conus/hrrr.t${hh}z.wrfsfcf01.grib2.idx`;
+    const r = await fetch(url, { headers: { Range: "bytes=0-16" } });
+    if (r.ok || r.status === 206) return `${ymd}${hh}`;
+  }
+  return null;
+}
+
+/** Hourly HRRR runs only reach f18. The 00/06/12/18z *synoptic* runs reach f48,
+ *  so they extend the timeline 18→24h+. Find the freshest whose f24 is published. */
+async function latestSynopticRun(): Promise<string | null> {
+  const now = Date.now();
+  for (let back = 0; back <= 30; back++) {
+    const t = new Date(now - back * 3600_000);
+    if (![0, 6, 12, 18].includes(t.getUTCHours())) continue;
+    const ymd = t.toISOString().slice(0, 10).replace(/-/g, "");
+    const hh = String(t.getUTCHours()).padStart(2, "0");
+    const url = `${HRRR_BASE}/hrrr.${ymd}/conus/hrrr.t${hh}z.wrfsfcf24.grib2.idx`;
     const r = await fetch(url, { headers: { Range: "bytes=0-16" } });
     if (r.ok || r.status === 206) return `${ymd}${hh}`;
   }
@@ -122,39 +141,52 @@ async function put(key: string, body: Uint8Array, contentType: string): Promise<
 
 // ── main ─────────────────────────────────────────────────────────────────────
 
+interface Job { run: string; step: Step; zoomMax: number; }
+
 async function main() {
-  const run = await latestRun();
-  if (!run) { console.error("No HRRR run available"); process.exit(1); }
-  console.log(`HRRR run ${run}, zoom ${ZOOM_MIN}..${ZOOM_MAX}`);
+  const runH = await latestRun();
+  if (!runH) { console.error("No HRRR run available"); process.exit(1); }
 
-  const steps: Step[] = [
-    ...SUBHOURLY_MIN.map(subhourlyStep),
-    ...Array.from({ length: 18 }, (_, i) => hourlyStep(i + 1)),
+  // Near-term + hourly (0–18h) from the freshest run, at full zoom.
+  const jobs: Job[] = [
+    ...SUBHOURLY_MIN.map((m) => ({ run: runH, step: subhourlyStep(m), zoomMax: ZOOM_MAX })),
+    ...Array.from({ length: 18 }, (_, i) => ({ run: runH, step: hourlyStep(i + 1), zoomMax: ZOOM_MAX })),
   ];
+  // 18→24h+ synoptic tail from the latest 00/06/12/18z run, at a coarse zoom.
+  const runS = await latestSynopticRun();
+  const hourlyLastValid = Date.parse(validTime(runH, 18 * 60));
+  if (runS) {
+    for (let h = 19; h <= 30; h++) {
+      if (Date.parse(validTime(runS, h * 60)) <= hourlyLastValid) continue;
+      jobs.push({ run: runS, step: hourlyStep(h), zoomMax: SYNOPTIC_ZOOM_MAX });
+    }
+  }
+  console.log(`HRRR run ${runH} (synoptic ${runS ?? "none"}), ${jobs.length} candidate frames`);
 
-  const manifestFrames: { token: string; valid: string }[] = [];
+  const manifestFrames: { token: string; valid: string; zoomMax: number }[] = [];
   let totalTiles = 0;
 
-  for (const step of steps) {
-    const field = await fetchField(run, step);
-    if (!field) { console.log(`  ${step.token}: no data, skipped`); continue; }
+  for (const job of jobs) {
+    const field = await fetchField(job.run, job.step);
+    if (!field) { console.log(`  ${job.step.token}: no data, skipped`); continue; }
 
     // Render every CONUS tile across the zoom range; keep only non-empty ones.
     const tiles: { key: string; png: Uint8Array }[] = [];
-    for (let z = ZOOM_MIN; z <= ZOOM_MAX; z++) {
+    for (let z = ZOOM_MIN; z <= job.zoomMax; z++) {
       for (const [x, y] of conusTiles(z)) {
         const png = renderTile(field, z, x, y);
-        if (png) tiles.push({ key: `hrrr/${run}/${step.token}/${z}/${x}/${y}.png`, png });
+        if (png) tiles.push({ key: `hrrr/${job.run}/${job.step.token}/${z}/${x}/${y}.png`, png });
       }
     }
     await pMapLimit(tiles, 24, (t) => put(t.key, t.png, "image/png"));
     totalTiles += tiles.length;
-    manifestFrames.push({ token: `${run}/${step.token}`, valid: validTime(run, step.minute) });
-    console.log(`  ${step.token}: ${tiles.length} tiles`);
+    manifestFrames.push({ token: `${job.run}/${job.step.token}`, valid: validTime(job.run, job.step.minute), zoomMax: job.zoomMax });
+    console.log(`  ${job.step.token} (z≤${job.zoomMax}): ${tiles.length} tiles`);
   }
 
   // Manifest the Worker reads to build the forecast timeline.
-  const manifest = { run, updated: new Date().toISOString(), zoomMax: ZOOM_MAX, frames: manifestFrames };
+  manifestFrames.sort((a, b) => Date.parse(a.valid) - Date.parse(b.valid));
+  const manifest = { run: runH, updated: new Date().toISOString(), zoomMax: ZOOM_MAX, frames: manifestFrames };
   await put("hrrr/manifest.json", new TextEncoder().encode(JSON.stringify(manifest)), "application/json");
   console.log(`Done: ${totalTiles} tiles across ${manifestFrames.length} frames → r2://${bucket}/hrrr/`);
 }

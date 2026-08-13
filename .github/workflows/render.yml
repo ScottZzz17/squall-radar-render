@@ -1,13 +1,12 @@
 name: render-hrrr
 
-# HRRR publishes hourly, but a 1–18 h forecast barely shifts hour-to-hour, so
-# rendering every 2 h keeps R2 writes comfortably inside the free tier (~2.5k
-# tiles/run × 12/day ≈ 0.9M/month vs the 1M free cap). Near-term freshness comes
-# from RainViewer's nowcast + live observed radar, not this. Bump to hourly only
-# if you drop ZOOM_MAX to 5 (see README budget note).
+# HRRR publishes hourly, but a multi-hour forecast barely shifts hour-to-hour, so
+# rendering every 3 h keeps R2 writes comfortably inside the free tier (~2.9k
+# tiles/run incl. the synoptic 24h tail × 8/day ≈ 0.7M/month vs the 1M free cap).
+# Near-term (0–1h) freshness comes from the app's on-device nowcast, not this.
 on:
   schedule:
-    - cron: "20 */2 * * *" # every 2 h at :20 UTC
+    - cron: "20 */3 * * *" # every 3 h at :20 UTC
   workflow_dispatch: {}     # manual "Run workflow" button
 
 # One run at a time; cancel an overlapping older run.
