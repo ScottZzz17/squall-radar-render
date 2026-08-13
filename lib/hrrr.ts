@@ -54,14 +54,16 @@ export function sampleDbz(f: HrrrField, latDeg: number, lonDeg: number): number 
 
 // ── dBZ → RGBA (N0Q ramp) ────────────────────────────────────────────────────
 
-// Matches the app's SquallRadar.standard legend ramp exactly (green → yellow →
-// orange → red → magenta → purple) so forecast tiles read identically to the
-// legend, and close to RainViewer's NEXRAD-L3 observed scheme.
+// Replicates RainViewer's fixed observed palette (blue light-end → yellow →
+// orange → red → magenta → white) so forecast tiles read identically to the
+// observed radar and the app legend. RainViewer's public API ignores the colour
+// param, so matching *to* it is the only way to unify the two layers.
 const RAMP: Array<[number, number, number, number]> = [
-  [5,  0x9b, 0xe5, 0x9b], [15, 0x4c, 0xcb, 0x4f], [25, 0x1f, 0xa0, 0x47],
-  [30, 0xf2, 0xe8, 0x4d], [35, 0xf7, 0xb7, 0x33], [40, 0xf4, 0x7a, 0x22],
-  [50, 0xef, 0x36, 0x36], [60, 0xb9, 0x1f, 0x24], [65, 0xcf, 0x3f, 0xa4],
-  [70, 0x8a, 0x2b, 0xe2],
+  [5,  0x88, 0xdd, 0xee], [10, 0x51, 0xc5, 0xe8], [15, 0x1b, 0xae, 0xe2],
+  [20, 0x00, 0x91, 0xca], [25, 0x00, 0x77, 0xaa], [30, 0x00, 0x55, 0x88],
+  [35, 0xff, 0xee, 0x00], [40, 0xff, 0xb7, 0x00], [45, 0xff, 0x8b, 0x00],
+  [50, 0xf2, 0x36, 0x00], [55, 0xc1, 0x00, 0x00], [60, 0x8f, 0x00, 0x00],
+  [65, 0xff, 0x81, 0xff], [70, 0xff, 0xff, 0xff],
 ];
 
 /** dBZ → [r,g,b,a]; transparent below ~10 dBZ (drizzle/no-echo), else fully
