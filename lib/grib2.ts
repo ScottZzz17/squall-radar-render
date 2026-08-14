@@ -68,6 +68,7 @@ export function decodeGrib2(buf: Uint8Array): Grib2Field {
   }
   let grid: LccGrid | null = null;
   let drt: number[] | null = null; // §5 template values (parsed positionally)
+  let dataTmpl = -1;               // §5 data representation template (0 or 3)
   let R = 0, E = 0, D = 0, nbits = 0, order = 0, nds = 0, numpts = 0;
   let refGW = 0, nbitsGW = 0, refGL = 0, incGL = 0, lastGL = 0, nbitsGL = 0, NG = 0;
   let dataStart = -1;
@@ -98,23 +99,27 @@ export function decodeGrib2(buf: Uint8Array): Grib2Field {
       };
     } else if (secNum === 5) {
       numpts = u32(buf, i + 5);
-      const tmpl = u16(buf, i + 9);
-      if (tmpl !== 3) throw new Error(`data template ${tmpl} != 3 (complex+spatial)`);
+      dataTmpl = u16(buf, i + 9);
       const t = i + 11; // template 5.x body starts at octet 12 → i+11
+      // Templates 5.0 (simple) and 5.3 (complex+spatial) share the same first
+      // four fields (R, E, D, nbits); only 5.3 carries the group metadata.
+      if (dataTmpl !== 0 && dataTmpl !== 3) throw new Error(`data template ${dataTmpl} unsupported (need 0 or 3)`);
       R = f32(buf, t + 0);
       E = s16(buf, t + 4);
       D = s16(buf, t + 6);
       nbits = buf[t + 8];
-      // t+9 type, t+10 splitting, t+11 missing-mgmt, t+12..19 missing subs
-      NG = u32(buf, t + 20);
-      refGW = buf[t + 24];
-      nbitsGW = buf[t + 25];
-      refGL = u32(buf, t + 26);
-      incGL = buf[t + 30];
-      lastGL = u32(buf, t + 31);
-      nbitsGL = buf[t + 35];
-      order = buf[t + 36];      // octet 48
-      nds = buf[t + 37];        // octet 49: bytes per extra descriptor
+      if (dataTmpl === 3) {
+        // t+9 type, t+10 splitting, t+11 missing-mgmt, t+12..19 missing subs
+        NG = u32(buf, t + 20);
+        refGW = buf[t + 24];
+        nbitsGW = buf[t + 25];
+        refGL = u32(buf, t + 26);
+        incGL = buf[t + 30];
+        lastGL = u32(buf, t + 31);
+        nbitsGL = buf[t + 35];
+        order = buf[t + 36];      // octet 48
+        nds = buf[t + 37];        // octet 49: bytes per extra descriptor
+      }
       drt = [R, E, D, nbits];
     } else if (secNum === 7) {
       dataStart = i + 5; // data begins at octet 6 of §7
@@ -123,6 +128,23 @@ export function decodeGrib2(buf: Uint8Array): Grib2Field {
   }
 
   if (!grid || !drt || dataStart < 0) throw new Error("missing grid/data section");
+
+  const twoE = Math.pow(2, E);
+  const tenD = Math.pow(10, D);
+
+  // ── Template 5.0: simple packing — numpts values of `nbits` bits, no groups,
+  //    no differencing. (HRRR uses this for near-constant fields, e.g. DSWRF at
+  //    night, where complex packing would save nothing.)
+  if (dataTmpl === 0) {
+    const values = new Float32Array(numpts);
+    if (nbits === 0) {
+      values.fill(R / tenD);   // constant field
+    } else {
+      const br0 = new BitReader(buf, dataStart);
+      for (let m = 0; m < numpts; m++) values[m] = (R + br0.read(nbits) * twoE) / tenD;
+    }
+    return { grid, values };
+  }
 
   // ── §7: spatial-differencing extra descriptors, then complex-packed groups ──
   const br = new BitReader(buf, dataStart);
@@ -178,8 +200,6 @@ export function decodeGrib2(buf: Uint8Array): Grib2Field {
   }
 
   // Scale: value = (R + X * 2^E) / 10^D.
-  const twoE = Math.pow(2, E);
-  const tenD = Math.pow(10, D);
   const values = new Float32Array(numpts);
   for (let m = 0; m < numpts; m++) values[m] = (R + X[m] * twoE) / tenD;
 

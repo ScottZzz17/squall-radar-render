@@ -12,7 +12,7 @@
 //   ZOOM_MIN (default 3), ZOOM_MAX (default 6)
 
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-import { prepareHrrr, renderTile, dbzColor, tempColor, windColor, uvColor, type HrrrField } from "./lib/hrrr.ts";
+import { prepareHrrr, renderTile, dbzColor, tempColor, windColor, uvColor, sampleField, type HrrrField } from "./lib/hrrr.ts";
 
 const HRRR_BASE = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com";
 const ZOOM_MIN = Number(process.env.ZOOM_MIN ?? 3);
@@ -200,6 +200,45 @@ function uvStep(fh: number): Step {
            matches: (p) => p[3] === "DSWRF" && p[4] === "surface" };
 }
 
+// ── wind vector field (for the client particle animation) ────────────────────
+// Not tiles: a single compact lat/lon grid of 10 m U/V (m/s) the app advects
+// particles through. Coarse (the flow is smooth) so the JSON stays a few KB.
+const VEC_NX = Number(process.env.VEC_NX ?? 120);
+const VEC_NY = Number(process.env.VEC_NY ?? 60);
+function ugrd10(fh: number): Step {
+  return { token: `f${fh}`, minute: fh * 60, file: `wrfsfcf${String(fh).padStart(2, "0")}`,
+           matches: (p) => p[3] === "UGRD" && p[4] === "10 m above ground" };
+}
+function vgrd10(fh: number): Step {
+  return { token: `f${fh}`, minute: fh * 60, file: `wrfsfcf${String(fh).padStart(2, "0")}`,
+           matches: (p) => p[3] === "VGRD" && p[4] === "10 m above ground" };
+}
+
+/** Sample U/V onto the CONUS grid and write windvec/manifest.json. One frame
+ *  (near-term f1) — the particle layer shows current flow, not a timeline. */
+async function renderWindVectors(run: string): Promise<void> {
+  const u = await fetchField(run, ugrd10(1));
+  const v = await fetchField(run, vgrd10(1));
+  if (!u || !v) { console.log("windvec: U/V unavailable, skipped"); return; }
+  const us: number[] = [], vs: number[] = [];
+  for (let j = 0; j < VEC_NY; j++) {
+    const lat = CONUS.north - (CONUS.north - CONUS.south) * (j + 0.5) / VEC_NY;
+    for (let i = 0; i < VEC_NX; i++) {
+      const lon = CONUS.west + (CONUS.east - CONUS.west) * (i + 0.5) / VEC_NX;
+      const uu = sampleField(u, lat, lon), vv = sampleField(v, lat, lon);
+      us.push(Number.isFinite(uu) ? Math.round(uu * 10) / 10 : 0);
+      vs.push(Number.isFinite(vv) ? Math.round(vv * 10) / 10 : 0);
+    }
+  }
+  const m = {
+    run, updated: new Date().toISOString(), valid: validTime(run, 60),
+    bounds: CONUS, nx: VEC_NX, ny: VEC_NY, u: us, v: vs,
+  };
+  const body = new TextEncoder().encode(JSON.stringify(m));
+  await put("windvec/manifest.json", body, "application/json");
+  console.log(`windvec: ${VEC_NX}x${VEC_NY} grid, ${(body.length / 1024).toFixed(1)} KB`);
+}
+
 async function main() {
   const runH = await latestRun();
   if (!runH) { console.error("No HRRR run available"); process.exit(1); }
@@ -236,6 +275,9 @@ async function main() {
   const uvJobs: Job[] = FIELD_LEADS.map((fh) => ({ run: runH, step: uvStep(fh), zoomMax: FIELD_ZOOM_MAX }));
   const uvFrames = await renderProduct("uv", uvJobs, uvColor);
   await writeManifest("uv", runH, FIELD_ZOOM_MAX, uvFrames);
+
+  // ── Wind vector field (particle animation source).
+  await renderWindVectors(runH);
 
   console.log("Done.");
 }

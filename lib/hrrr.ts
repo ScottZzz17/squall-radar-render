@@ -52,6 +52,11 @@ export function sampleDbz(f: HrrrField, latDeg: number, lonDeg: number): number 
   return f.values[j * f.grid.nx + i];
 }
 
+/** Nearest-cell value of any decoded HRRR field at a lat/lon (NaN off-grid).
+ *  `sampleDbz` is field-agnostic; this alias reads clearly for non-radar fields
+ *  (e.g. sampling UGRD/VGRD onto a wind vector grid). */
+export const sampleField = sampleDbz;
+
 // ── dBZ → RGBA (N0Q ramp) ────────────────────────────────────────────────────
 
 // Replicates RainViewer's fixed observed palette (blue light-end → yellow →
