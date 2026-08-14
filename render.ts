@@ -186,6 +186,28 @@ function tempStep(fh: number): Step {
 // Wind + UV share temp's cadence/zoom — smooth, slowly-changing fields.
 const FIELD_ZOOM_MAX = Number(process.env.FIELD_ZOOM_MAX ?? TEMP_ZOOM_MAX);
 const FIELD_LEADS = TEMP_LEADS;
+// The hourly HRRR run only reaches f18; extend the field layers to a real 24h
+// with a coarse synoptic tail (like the radar's tail), so their 24h view spans
+// a full day forward. Cheap: 2 frames × 3 products at low zoom.
+const FIELD_TAIL_LEADS = [21, 24];
+const FIELD_SYNOPTIC_ZOOM_MAX = Number(process.env.FIELD_SYNOPTIC_ZOOM_MAX ?? SYNOPTIC_ZOOM_MAX);
+
+interface FieldLead { run: string; fh: number; zoomMax: number; }
+
+/** Hourly field leads (runH, full field zoom) + a coarse synoptic tail (runS)
+ *  out to 24h. Tail frames whose valid time doesn't extend past the last hourly
+ *  frame are dropped (no duplicates when the synoptic run is stale). */
+function fieldLeads(runH: string, runS: string | null): FieldLead[] {
+  const leads: FieldLead[] = FIELD_LEADS.map((fh) => ({ run: runH, fh, zoomMax: FIELD_ZOOM_MAX }));
+  if (runS) {
+    const lastHourly = Date.parse(validTime(runH, FIELD_LEADS[FIELD_LEADS.length - 1] * 60));
+    for (const fh of FIELD_TAIL_LEADS) {
+      if (Date.parse(validTime(runS, fh * 60)) <= lastHourly) continue;
+      leads.push({ run: runS, fh, zoomMax: FIELD_SYNOPTIC_ZOOM_MAX });
+    }
+  }
+  return leads;
+}
 
 // 10 m wind speed. HRRR's single `WIND:10 m above ground` record is the hourly
 // max — a good visual speed proxy without combining U/V.
@@ -235,14 +257,14 @@ async function windVecFrame(run: string, fh: number): Promise<{ valid: string; u
 /** Write windvec/manifest.json: one U/V grid per forecast hour (aligned to the
  *  wind tile frames), so the app can blend the particle flow across the timeline.
  *  Each grid is a few KB; the whole manifest gzips small over the Worker. */
-async function renderWindVectors(run: string): Promise<void> {
+async function renderWindVectors(runH: string, runS: string | null): Promise<void> {
   const frames: { valid: string; u: number[]; v: number[] }[] = [];
-  for (const fh of FIELD_LEADS) {
-    const f = await windVecFrame(run, fh);
+  for (const l of fieldLeads(runH, runS)) {
+    const f = await windVecFrame(l.run, l.fh);
     if (f) frames.push(f);
   }
   if (frames.length === 0) { console.log("windvec: U/V unavailable, skipped"); return; }
-  const m = { run, updated: new Date().toISOString(), bounds: CONUS, nx: VEC_NX, ny: VEC_NY, frames };
+  const m = { run: runH, updated: new Date().toISOString(), bounds: CONUS, nx: VEC_NX, ny: VEC_NY, frames };
   const body = new TextEncoder().encode(JSON.stringify(m));
   await put("windvec/manifest.json", body, "application/json");
   console.log(`windvec: ${VEC_NX}x${VEC_NY} × ${frames.length} frames, ${(body.length / 1024).toFixed(1)} KB`);
@@ -270,23 +292,26 @@ async function main() {
   const radarFrames = await renderProduct("hrrr", radarJobs, dbzColor);
   await writeManifest("hrrr", runH, ZOOM_MAX, radarFrames);
 
+  // Field layers (temp/wind/UV/windvec) share hourly leads + a synoptic 24h tail.
+  const fLeads = fieldLeads(runH, runS);
+
   // ── Temperature map.
-  const tempJobs: Job[] = TEMP_LEADS.map((fh) => ({ run: runH, step: tempStep(fh), zoomMax: TEMP_ZOOM_MAX }));
+  const tempJobs: Job[] = fLeads.map((l) => ({ run: l.run, step: tempStep(l.fh), zoomMax: l.zoomMax }));
   const tempFrames = await renderProduct("temp", tempJobs, tempColor);
   await writeManifest("temp", runH, TEMP_ZOOM_MAX, tempFrames);
 
   // ── Wind-speed map.
-  const windJobs: Job[] = FIELD_LEADS.map((fh) => ({ run: runH, step: windStep(fh), zoomMax: FIELD_ZOOM_MAX }));
+  const windJobs: Job[] = fLeads.map((l) => ({ run: l.run, step: windStep(l.fh), zoomMax: l.zoomMax }));
   const windFrames = await renderProduct("wind", windJobs, windColor);
   await writeManifest("wind", runH, FIELD_ZOOM_MAX, windFrames);
 
   // ── UV-exposure map.
-  const uvJobs: Job[] = FIELD_LEADS.map((fh) => ({ run: runH, step: uvStep(fh), zoomMax: FIELD_ZOOM_MAX }));
+  const uvJobs: Job[] = fLeads.map((l) => ({ run: l.run, step: uvStep(l.fh), zoomMax: l.zoomMax }));
   const uvFrames = await renderProduct("uv", uvJobs, uvColor);
   await writeManifest("uv", runH, FIELD_ZOOM_MAX, uvFrames);
 
   // ── Wind vector field (particle animation source).
-  await renderWindVectors(runH);
+  await renderWindVectors(runH, runS);
 
   console.log("Done.");
 }
