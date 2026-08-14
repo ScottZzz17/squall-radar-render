@@ -214,12 +214,11 @@ function vgrd10(fh: number): Step {
            matches: (p) => p[3] === "VGRD" && p[4] === "10 m above ground" };
 }
 
-/** Sample U/V onto the CONUS grid and write windvec/manifest.json. One frame
- *  (near-term f1) — the particle layer shows current flow, not a timeline. */
-async function renderWindVectors(run: string): Promise<void> {
-  const u = await fetchField(run, ugrd10(1));
-  const v = await fetchField(run, vgrd10(1));
-  if (!u || !v) { console.log("windvec: U/V unavailable, skipped"); return; }
+/** Sample one forecast lead's U/V onto the CONUS grid (row-major, j=0 = north). */
+async function windVecFrame(run: string, fh: number): Promise<{ valid: string; u: number[]; v: number[] } | null> {
+  const u = await fetchField(run, ugrd10(fh));
+  const v = await fetchField(run, vgrd10(fh));
+  if (!u || !v) return null;
   const us: number[] = [], vs: number[] = [];
   for (let j = 0; j < VEC_NY; j++) {
     const lat = CONUS.north - (CONUS.north - CONUS.south) * (j + 0.5) / VEC_NY;
@@ -230,13 +229,23 @@ async function renderWindVectors(run: string): Promise<void> {
       vs.push(Number.isFinite(vv) ? Math.round(vv * 10) / 10 : 0);
     }
   }
-  const m = {
-    run, updated: new Date().toISOString(), valid: validTime(run, 60),
-    bounds: CONUS, nx: VEC_NX, ny: VEC_NY, u: us, v: vs,
-  };
+  return { valid: validTime(run, fh * 60), u: us, v: vs };
+}
+
+/** Write windvec/manifest.json: one U/V grid per forecast hour (aligned to the
+ *  wind tile frames), so the app can blend the particle flow across the timeline.
+ *  Each grid is a few KB; the whole manifest gzips small over the Worker. */
+async function renderWindVectors(run: string): Promise<void> {
+  const frames: { valid: string; u: number[]; v: number[] }[] = [];
+  for (const fh of FIELD_LEADS) {
+    const f = await windVecFrame(run, fh);
+    if (f) frames.push(f);
+  }
+  if (frames.length === 0) { console.log("windvec: U/V unavailable, skipped"); return; }
+  const m = { run, updated: new Date().toISOString(), bounds: CONUS, nx: VEC_NX, ny: VEC_NY, frames };
   const body = new TextEncoder().encode(JSON.stringify(m));
   await put("windvec/manifest.json", body, "application/json");
-  console.log(`windvec: ${VEC_NX}x${VEC_NY} grid, ${(body.length / 1024).toFixed(1)} KB`);
+  console.log(`windvec: ${VEC_NX}x${VEC_NY} × ${frames.length} frames, ${(body.length / 1024).toFixed(1)} KB`);
 }
 
 async function main() {
