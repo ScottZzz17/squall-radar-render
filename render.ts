@@ -12,7 +12,7 @@
 //   ZOOM_MIN (default 3), ZOOM_MAX (default 6)
 
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-import { prepareHrrr, renderTile, dbzColor, tempColor, type HrrrField } from "./lib/hrrr.ts";
+import { prepareHrrr, renderTile, dbzColor, tempColor, windColor, uvColor, type HrrrField } from "./lib/hrrr.ts";
 
 const HRRR_BASE = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com";
 const ZOOM_MIN = Number(process.env.ZOOM_MIN ?? 3);
@@ -183,6 +183,23 @@ function tempStep(fh: number): Step {
            matches: (p) => p[3] === "TMP" && p[4] === "2 m above ground" };
 }
 
+// Wind + UV share temp's cadence/zoom — smooth, slowly-changing fields.
+const FIELD_ZOOM_MAX = Number(process.env.FIELD_ZOOM_MAX ?? TEMP_ZOOM_MAX);
+const FIELD_LEADS = TEMP_LEADS;
+
+// 10 m wind speed. HRRR's single `WIND:10 m above ground` record is the hourly
+// max — a good visual speed proxy without combining U/V.
+function windStep(fh: number): Step {
+  return { token: `f${fh}`, minute: fh * 60, file: `wrfsfcf${String(fh).padStart(2, "0")}`,
+           matches: (p) => p[3] === "WIND" && p[4] === "10 m above ground" };
+}
+
+// UV exposure proxy: surface downward shortwave (see uvColor).
+function uvStep(fh: number): Step {
+  return { token: `f${fh}`, minute: fh * 60, file: `wrfsfcf${String(fh).padStart(2, "0")}`,
+           matches: (p) => p[3] === "DSWRF" && p[4] === "surface" };
+}
+
 async function main() {
   const runH = await latestRun();
   if (!runH) { console.error("No HRRR run available"); process.exit(1); }
@@ -209,6 +226,16 @@ async function main() {
   const tempJobs: Job[] = TEMP_LEADS.map((fh) => ({ run: runH, step: tempStep(fh), zoomMax: TEMP_ZOOM_MAX }));
   const tempFrames = await renderProduct("temp", tempJobs, tempColor);
   await writeManifest("temp", runH, TEMP_ZOOM_MAX, tempFrames);
+
+  // ── Wind-speed map.
+  const windJobs: Job[] = FIELD_LEADS.map((fh) => ({ run: runH, step: windStep(fh), zoomMax: FIELD_ZOOM_MAX }));
+  const windFrames = await renderProduct("wind", windJobs, windColor);
+  await writeManifest("wind", runH, FIELD_ZOOM_MAX, windFrames);
+
+  // ── UV-exposure map.
+  const uvJobs: Job[] = FIELD_LEADS.map((fh) => ({ run: runH, step: uvStep(fh), zoomMax: FIELD_ZOOM_MAX }));
+  const uvFrames = await renderProduct("uv", uvJobs, uvColor);
+  await writeManifest("uv", runH, FIELD_ZOOM_MAX, uvFrames);
 
   console.log("Done.");
 }

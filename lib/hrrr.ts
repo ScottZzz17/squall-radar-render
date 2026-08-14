@@ -95,6 +95,43 @@ export function tempColor(kelvin: number): [number, number, number, number] {
   return [c[1], c[2], c[3], 255];
 }
 
+// ── 10 m wind speed (m/s) → RGBA, calm→high, by mph ──────────────────────────
+// Matches the app's CALM→HIGH blue ramp (NowRadarScreen footerScaleColors.wind).
+const WIND_RAMP: Array<[number, number, number, number]> = [
+  [0, 0xc4, 0xe3, 0xfa], [8, 0x78, 0xbf, 0xf5], [16, 0x36, 0x99, 0xe8],
+  [25, 0x17, 0x6e, 0xc9], [35, 0x0d, 0x47, 0x99],
+];
+
+/** HRRR 10 m wind speed (m/s) → RGBA. Opaque on-grid; the overlay's own opacity
+ *  fades it. Transparent only off-grid (NaN). */
+export function windColor(ms: number): [number, number, number, number] {
+  if (!Number.isFinite(ms)) return [0, 0, 0, 0];
+  const mph = ms * 2.236936;
+  let c = WIND_RAMP[0];
+  for (const anchor of WIND_RAMP) { if (mph >= anchor[0]) c = anchor; else break; }
+  return [c[1], c[2], c[3], 255];
+}
+
+// ── UV exposure via surface downward shortwave (DSWRF, W/m²) → RGBA ───────────
+// HRRR carries no UV-index field; DSWRF (total surface shortwave, W/m²) is the
+// physical driver of UV and already folds in solar elevation + cloud cover, so
+// it's the honest proxy for a UV-exposure heatmap. Below ~50 W/m² (night / deep
+// overcast) we draw nothing so the map isn't painted edge-to-edge after dark.
+// Ramp matches the app's LOW→EXTREME legend (go→advisory→watch→warning→extreme).
+const UV_RAMP: Array<[number, number, number, number]> = [
+  [50, 0x1f, 0xa0, 0x47], [250, 0xd9, 0xa4, 0x41], [500, 0xe8, 0x8a, 0x3a],
+  [750, 0xe5, 0x31, 0x2b], [950, 0xc2, 0x1f, 0xa6],
+];
+
+/** HRRR surface DSWRF (W/m²) → RGBA UV-exposure ramp. Transparent below the
+ *  night/overcast floor and off-grid. */
+export function uvColor(wm2: number): [number, number, number, number] {
+  if (!Number.isFinite(wm2) || wm2 < 50) return [0, 0, 0, 0];
+  let c = UV_RAMP[0];
+  for (const anchor of UV_RAMP) { if (wm2 >= anchor[0]) c = anchor; else break; }
+  return [c[1], c[2], c[3], 255];
+}
+
 // ── tile render ──────────────────────────────────────────────────────────────
 
 /** Web-mercator pixel → lat/lon (degrees). */
