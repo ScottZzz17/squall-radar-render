@@ -12,7 +12,7 @@
 //   ZOOM_MIN (default 3), ZOOM_MAX (default 6)
 
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-import { prepareHrrr, renderTile, type HrrrField } from "./lib/hrrr.ts";
+import { prepareHrrr, renderTile, dbzColor, tempColor, type HrrrField } from "./lib/hrrr.ts";
 
 const HRRR_BASE = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com";
 const ZOOM_MIN = Number(process.env.ZOOM_MIN ?? 3);
@@ -142,53 +142,75 @@ async function put(key: string, body: Uint8Array, contentType: string): Promise<
 // ── main ─────────────────────────────────────────────────────────────────────
 
 interface Job { run: string; step: Step; zoomMax: number; }
+type ColorFn = (value: number) => [number, number, number, number];
+
+/** Render a product's jobs (skipping empty tiles), upload to `{prefix}/…`, and
+ *  return its manifest frames. Reused for every HRRR-field map layer. */
+async function renderProduct(prefix: string, jobs: Job[], color: ColorFn): Promise<{ token: string; valid: string; zoomMax: number }[]> {
+  const frames: { token: string; valid: string; zoomMax: number }[] = [];
+  let total = 0;
+  for (const job of jobs) {
+    const field = await fetchField(job.run, job.step);
+    if (!field) { console.log(`  ${prefix}/${job.step.token}: no data, skipped`); continue; }
+    const tiles: { key: string; png: Uint8Array }[] = [];
+    for (let z = ZOOM_MIN; z <= job.zoomMax; z++) {
+      for (const [x, y] of conusTiles(z)) {
+        const png = renderTile(field, z, x, y, color);
+        if (png) tiles.push({ key: `${prefix}/${job.run}/${job.step.token}/${z}/${x}/${y}.png`, png });
+      }
+    }
+    await pMapLimit(tiles, 24, (t) => put(t.key, t.png, "image/png"));
+    total += tiles.length;
+    frames.push({ token: `${job.run}/${job.step.token}`, valid: validTime(job.run, job.step.minute), zoomMax: job.zoomMax });
+    console.log(`  ${prefix}/${job.step.token} (z≤${job.zoomMax}): ${tiles.length} tiles`);
+  }
+  frames.sort((a, b) => Date.parse(a.valid) - Date.parse(b.valid));
+  console.log(`${prefix}: ${total} tiles, ${frames.length} frames`);
+  return frames;
+}
+
+async function writeManifest(prefix: string, run: string, zoomMax: number, frames: unknown) {
+  const m = { run, updated: new Date().toISOString(), zoomMax, frames };
+  await put(`${prefix}/manifest.json`, new TextEncoder().encode(JSON.stringify(m)), "application/json");
+}
+
+// Temperature layer: 2 m temp, coarse zoom, a few forecast hours (it's a smooth,
+// slowly-changing field, so it needs neither high zoom nor a dense timeline).
+const TEMP_ZOOM_MAX = Number(process.env.TEMP_ZOOM_MAX ?? 5);
+const TEMP_LEADS = [1, 3, 6, 9, 12, 18];
+function tempStep(fh: number): Step {
+  return { token: `f${fh}`, minute: fh * 60, file: `wrfsfcf${String(fh).padStart(2, "0")}`,
+           matches: (p) => p[3] === "TMP" && p[4] === "2 m above ground" };
+}
 
 async function main() {
   const runH = await latestRun();
   if (!runH) { console.error("No HRRR run available"); process.exit(1); }
 
-  // Near-term + hourly (0–18h) from the freshest run, at full zoom.
-  const jobs: Job[] = [
+  // ── Radar (REFC): near-term + hourly (0–18h) at full zoom + synoptic 18→24h.
+  const radarJobs: Job[] = [
     ...SUBHOURLY_MIN.map((m) => ({ run: runH, step: subhourlyStep(m), zoomMax: ZOOM_MAX })),
     ...Array.from({ length: 18 }, (_, i) => ({ run: runH, step: hourlyStep(i + 1), zoomMax: ZOOM_MAX })),
   ];
-  // 18→24h+ synoptic tail from the latest 00/06/12/18z run, at a coarse zoom.
   const runS = await latestSynopticRun();
   const hourlyLastValid = Date.parse(validTime(runH, 18 * 60));
   if (runS) {
     for (let h = 19; h <= 30; h++) {
       if (Date.parse(validTime(runS, h * 60)) <= hourlyLastValid) continue;
-      jobs.push({ run: runS, step: hourlyStep(h), zoomMax: SYNOPTIC_ZOOM_MAX });
+      radarJobs.push({ run: runS, step: hourlyStep(h), zoomMax: SYNOPTIC_ZOOM_MAX });
     }
   }
-  console.log(`HRRR run ${runH} (synoptic ${runS ?? "none"}), ${jobs.length} candidate frames`);
+  console.log(`HRRR run ${runH} (synoptic ${runS ?? "none"})`);
 
-  const manifestFrames: { token: string; valid: string; zoomMax: number }[] = [];
-  let totalTiles = 0;
+  const radarFrames = await renderProduct("hrrr", radarJobs, dbzColor);
+  await writeManifest("hrrr", runH, ZOOM_MAX, radarFrames);
 
-  for (const job of jobs) {
-    const field = await fetchField(job.run, job.step);
-    if (!field) { console.log(`  ${job.step.token}: no data, skipped`); continue; }
+  // ── Temperature map.
+  const tempJobs: Job[] = TEMP_LEADS.map((fh) => ({ run: runH, step: tempStep(fh), zoomMax: TEMP_ZOOM_MAX }));
+  const tempFrames = await renderProduct("temp", tempJobs, tempColor);
+  await writeManifest("temp", runH, TEMP_ZOOM_MAX, tempFrames);
 
-    // Render every CONUS tile across the zoom range; keep only non-empty ones.
-    const tiles: { key: string; png: Uint8Array }[] = [];
-    for (let z = ZOOM_MIN; z <= job.zoomMax; z++) {
-      for (const [x, y] of conusTiles(z)) {
-        const png = renderTile(field, z, x, y);
-        if (png) tiles.push({ key: `hrrr/${job.run}/${job.step.token}/${z}/${x}/${y}.png`, png });
-      }
-    }
-    await pMapLimit(tiles, 24, (t) => put(t.key, t.png, "image/png"));
-    totalTiles += tiles.length;
-    manifestFrames.push({ token: `${job.run}/${job.step.token}`, valid: validTime(job.run, job.step.minute), zoomMax: job.zoomMax });
-    console.log(`  ${job.step.token} (z≤${job.zoomMax}): ${tiles.length} tiles`);
-  }
-
-  // Manifest the Worker reads to build the forecast timeline.
-  manifestFrames.sort((a, b) => Date.parse(a.valid) - Date.parse(b.valid));
-  const manifest = { run: runH, updated: new Date().toISOString(), zoomMax: ZOOM_MAX, frames: manifestFrames };
-  await put("hrrr/manifest.json", new TextEncoder().encode(JSON.stringify(manifest)), "application/json");
-  console.log(`Done: ${totalTiles} tiles across ${manifestFrames.length} frames → r2://${bucket}/hrrr/`);
+  console.log("Done.");
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

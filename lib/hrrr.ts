@@ -69,10 +69,29 @@ const RAMP: Array<[number, number, number, number]> = [
 /** dBZ → [r,g,b,a]; transparent below ~10 dBZ (drizzle/no-echo), else fully
  *  opaque. Partial alpha reads as washed-out grey/white once MapKit premultiplies
  *  it, so echo pixels are solid — the overlay's own opacity does the fade. */
-function dbzColor(dbz: number): [number, number, number, number] {
+export function dbzColor(dbz: number): [number, number, number, number] {
   if (!Number.isFinite(dbz) || dbz < 10) return [0, 0, 0, 0];
   let c = RAMP[0];
   for (const anchor of RAMP) { if (dbz >= anchor[0]) c = anchor; else break; }
+  return [c[1], c[2], c[3], 255];
+}
+
+// ── temperature (2m) → RGBA, blue(cold)→red(hot), by °F ──────────────────────
+const TEMP_RAMP: Array<[number, number, number, number]> = [
+  [-20, 0x7b, 0x3f, 0xf2], [0, 0x3b, 0x4c, 0xc0], [20, 0x4c, 0x8f, 0xe2],
+  [32, 0x6c, 0xd1, 0xeb], [45, 0x3f, 0xc4, 0x8f], [55, 0x7a, 0xcb, 0x4f],
+  [65, 0xc6, 0xd6, 0x00], [72, 0xf2, 0xe8, 0x4d], [80, 0xf7, 0xb7, 0x33],
+  [88, 0xf4, 0x7a, 0x22], [95, 0xef, 0x36, 0x36], [105, 0xb9, 0x1f, 0x24],
+  [115, 0x8a, 0x2b, 0xe2],
+];
+
+/** HRRR 2m temperature (Kelvin) → RGBA. Transparent off-grid; opaque otherwise
+ *  (the overlay's own opacity fades it over the basemap). */
+export function tempColor(kelvin: number): [number, number, number, number] {
+  if (!Number.isFinite(kelvin)) return [0, 0, 0, 0];
+  const f = (kelvin - 273.15) * 9 / 5 + 32;
+  let c = TEMP_RAMP[0];
+  for (const anchor of TEMP_RAMP) { if (f >= anchor[0]) c = anchor; else break; }
   return [c[1], c[2], c[3], 255];
 }
 
@@ -87,7 +106,10 @@ function pixelLatLon(worldX: number, worldY: number, worldSize: number): { lat: 
 
 /** Render one {z}/{x}/{y} tile to PNG bytes, or null if the tile has no echo
  *  (so the app draws nothing there). */
-export function renderTile(f: HrrrField, z: number, x: number, y: number): Uint8Array | null {
+export function renderTile(
+  f: HrrrField, z: number, x: number, y: number,
+  color: (value: number) => [number, number, number, number] = dbzColor,
+): Uint8Array | null {
   const worldSize = TILE * Math.pow(2, z);
   const rgba = new Uint8Array(TILE * TILE * 4);
   let any = false;
@@ -96,7 +118,7 @@ export function renderTile(f: HrrrField, z: number, x: number, y: number): Uint8
     for (let px = 0; px < TILE; px++) {
       const worldX = x * TILE + px;
       const { lat, lon } = pixelLatLon(worldX + 0.5, worldY + 0.5, worldSize);
-      const [r, g, b, a] = dbzColor(sampleDbz(f, lat, lon));
+      const [r, g, b, a] = color(sampleDbz(f, lat, lon));
       if (a === 0) continue;
       const o = (py * TILE + px) * 4;
       rgba[o] = r; rgba[o + 1] = g; rgba[o + 2] = b; rgba[o + 3] = a;
