@@ -189,7 +189,9 @@ const FIELD_LEADS = TEMP_LEADS;
 // The hourly HRRR run only reaches f18; extend the field layers to a real 24h
 // with a coarse synoptic tail (like the radar's tail), so their 24h view spans
 // a full day forward. Cheap: 2 frames × 3 products at low zoom.
-const FIELD_TAIL_LEADS = [21, 24];
+// Reach ~+30h from the synoptic run (3h cadence) so a 24h window measured from
+// *now* stays filled even when that run is several hours old.
+const FIELD_TAIL_LEADS = [21, 24, 27, 30];
 const FIELD_SYNOPTIC_ZOOM_MAX = Number(process.env.FIELD_SYNOPTIC_ZOOM_MAX ?? SYNOPTIC_ZOOM_MAX);
 
 interface FieldLead { run: string; fh: number; zoomMax: number; }
