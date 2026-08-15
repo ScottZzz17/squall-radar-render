@@ -176,7 +176,10 @@ async function writeManifest(prefix: string, run: string, zoomMax: number, frame
 
 // Temperature layer: 2 m temp, coarse zoom, a few forecast hours (it's a smooth,
 // slowly-changing field, so it needs neither high zoom nor a dense timeline).
-const TEMP_ZOOM_MAX = Number(process.env.TEMP_ZOOM_MAX ?? 5);
+// z4 (not z5): the fields are smooth and the app over-zoom-upscales anyway, so
+// dropping a zoom level is barely visible but ~3× fewer tiles — a safety buffer
+// that keeps the monthly R2 writes comfortably inside the free tier.
+const TEMP_ZOOM_MAX = Number(process.env.TEMP_ZOOM_MAX ?? 4);
 // Even 3-hour cadence (no 12→18 gap, which showed as a jump on the 24h slider).
 const TEMP_LEADS = [1, 3, 6, 9, 12, 15, 18];
 function tempStep(fh: number): Step {
