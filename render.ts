@@ -280,22 +280,35 @@ async function main() {
   const runH = await latestRun();
   if (!runH) { console.error("No HRRR run available"); process.exit(1); }
 
-  // ── Radar (REFC): near-term + hourly (0–18h) at full zoom + synoptic 18→24h.
-  const radarJobs: Job[] = [
+  // ── Radar (REFC): near-term sub-hourly + hourly (0–18h) at full zoom.
+  const nearJobs: Job[] = [
     ...SUBHOURLY_MIN.map((m) => ({ run: runH, step: subhourlyStep(m), zoomMax: ZOOM_MAX })),
     ...Array.from({ length: 18 }, (_, i) => ({ run: runH, step: hourlyStep(i + 1), zoomMax: ZOOM_MAX })),
   ];
-  const runS = await latestSynopticRun();
-  const hourlyLastValid = Date.parse(validTime(runH, 18 * 60));
-  if (runS) {
-    for (let h = 19; h <= 30; h++) {
-      if (Date.parse(validTime(runS, h * 60)) <= hourlyLastValid) continue;
-      radarJobs.push({ run: runS, step: hourlyStep(h), zoomMax: SYNOPTIC_ZOOM_MAX });
-    }
-  }
-  console.log(`HRRR run ${runH} (synoptic ${runS ?? "none"})`);
+  console.log(`HRRR run ${runH}`);
+  let radarFrames = await renderProduct("hrrr", nearJobs, dbzColor);
 
-  const radarFrames = await renderProduct("hrrr", radarJobs, dbzColor);
+  // Synoptic tail — fill *continuously* from wherever the hourly run actually
+  // reached (it may have published only its early hours when we ran) out to
+  // ~24h+, at coarse zoom. Anchoring on the real last frame (not the theoretical
+  // f18) closes the gap that otherwise left a hole in the timeline — which read
+  // as playback teleporting across unrendered hours.
+  const runS = await latestSynopticRun();
+  if (runS) {
+    const lastValid = radarFrames.length
+      ? Date.parse(radarFrames[radarFrames.length - 1].valid)
+      : Date.parse(validTime(runH, 60));
+    const maxValid = Date.now() + 27 * 3_600_000;
+    const tailJobs: Job[] = [];
+    for (let h = 6; h <= 42; h++) {
+      const v = Date.parse(validTime(runS, h * 60));
+      if (v <= lastValid || v > maxValid) continue;
+      tailJobs.push({ run: runS, step: hourlyStep(h), zoomMax: SYNOPTIC_ZOOM_MAX });
+    }
+    const tailFrames = await renderProduct("hrrr", tailJobs, dbzColor);
+    radarFrames = [...radarFrames, ...tailFrames].sort((a, b) => Date.parse(a.valid) - Date.parse(b.valid));
+  }
+  console.log(`HRRR synoptic ${runS ?? "none"}: ${radarFrames.length} total frames`);
   await writeManifest("hrrr", runH, ZOOM_MAX, radarFrames);
 
   // Field layers (temp/wind/UV/windvec) share hourly leads + a synoptic 24h tail.
