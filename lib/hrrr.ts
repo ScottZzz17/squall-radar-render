@@ -137,6 +137,20 @@ export function uvColor(wm2: number): [number, number, number, number] {
   return [c[1], c[2], c[3], 255];
 }
 
+/** HRRR near-surface smoke (MASSDEN, kg/m³) → RGBA, AirNow-style bands in
+ *  µg/m³. Transparent below ~5 µg/m³ (clean air). */
+const SMOKE_RAMP: [number, number, number, number, number][] = [
+  [5, 180, 180, 180, 90], [12, 214, 190, 120, 140], [35, 230, 150, 70, 170],
+  [55, 215, 80, 50, 190], [150, 150, 40, 90, 210], [250, 100, 20, 40, 225],
+];
+export function smokeColor(kgm3: number): [number, number, number, number] {
+  const ug = kgm3 * 1e9;
+  if (!Number.isFinite(ug) || ug < SMOKE_RAMP[0][0]) return [0, 0, 0, 0];
+  let c = SMOKE_RAMP[0];
+  for (const anchor of SMOKE_RAMP) { if (ug >= anchor[0]) c = anchor; else break; }
+  return [c[1], c[2], c[3], c[4]];
+}
+
 // ── tile render ──────────────────────────────────────────────────────────────
 
 /** Web-mercator pixel → lat/lon (degrees). */

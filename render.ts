@@ -12,7 +12,7 @@
 //   ZOOM_MIN (default 3), ZOOM_MAX (default 6)
 
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-import { prepareHrrr, renderTile, dbzColor, tempColor, windColor, uvColor, sampleField, type HrrrField } from "./lib/hrrr.ts";
+import { prepareHrrr, renderTile, dbzColor, tempColor, windColor, uvColor, smokeColor, sampleField, type HrrrField } from "./lib/hrrr.ts";
 
 const HRRR_BASE = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com";
 const ZOOM_MIN = Number(process.env.ZOOM_MIN ?? 3);
@@ -228,6 +228,12 @@ function uvStep(fh: number): Step {
            matches: (p) => p[3] === "DSWRF" && p[4] === "surface" };
 }
 
+// Near-surface wildfire smoke (HRRR-Smoke MASSDEN at 8 m).
+function smokeStep(fh: number): Step {
+  return { token: `f${fh}`, minute: fh * 60, file: `wrfsfcf${String(fh).padStart(2, "0")}`,
+           matches: (p) => p[3] === "MASSDEN" && p[4] === "8 m above ground" };
+}
+
 // ── wind vector field (for the client particle animation) ────────────────────
 // Not tiles: a single compact lat/lon grid of 10 m U/V (m/s) the app advects
 // particles through. Coarse (the flow is smooth) so the JSON stays a few KB.
@@ -328,6 +334,11 @@ async function main() {
   const uvJobs: Job[] = fLeads.map((l) => ({ run: l.run, step: uvStep(l.fh), zoomMax: l.zoomMax }));
   const uvFrames = await renderProduct("uv", uvJobs, uvColor);
   await writeManifest("uv", runH, FIELD_ZOOM_MAX, uvFrames);
+
+  // ── Wildfire smoke map (same cadence/zoom as the other fields).
+  const smokeJobs: Job[] = fLeads.map((l) => ({ run: l.run, step: smokeStep(l.fh), zoomMax: l.zoomMax }));
+  const smokeFrames = await renderProduct("smoke", smokeJobs, smokeColor);
+  await writeManifest("smoke", runH, FIELD_ZOOM_MAX, smokeFrames);
 
   // ── Wind vector field (particle animation source).
   await renderWindVectors(runH, runS);
