@@ -151,6 +151,22 @@ export function smokeColor(kgm3: number): [number, number, number, number] {
   return [c[1], c[2], c[3], c[4]];
 }
 
+// ── CAPE (J/kg) → RGBA ───────────────────────────────────────────────────────
+// SPC's mesoanalysis bands, near enough that a chaser reads them without
+// re-learning anything: nothing below 250 (that's not a storm environment),
+// then marginal → extreme.
+const CAPE_RAMP: [number, number, number, number, number][] = [
+  [250, 0x9e, 0xc8, 0x8f, 120], [500, 0xd8, 0xd2, 0x6a, 150],
+  [1000, 0xe8, 0xa8, 0x4a, 175], [2000, 0xdd, 0x6b, 0x3e, 200],
+  [3000, 0xc8, 0x36, 0x3c, 220], [4000, 0x9c, 0x27, 0x6b, 235],
+];
+export function capeColor(jkg: number): [number, number, number, number] {
+  if (!Number.isFinite(jkg) || jkg < CAPE_RAMP[0][0]) return [0, 0, 0, 0];
+  let c = CAPE_RAMP[0];
+  for (const anchor of CAPE_RAMP) { if (jkg >= anchor[0]) c = anchor; else break; }
+  return [c[1], c[2], c[3], c[4]];
+}
+
 // ── tile render ──────────────────────────────────────────────────────────────
 
 /** Web-mercator pixel → lat/lon (degrees). */

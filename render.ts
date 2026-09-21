@@ -12,7 +12,7 @@
 //   ZOOM_MIN (default 3), ZOOM_MAX (default 6)
 
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-import { prepareHrrr, renderTile, dbzColor, tempColor, windColor, uvColor, smokeColor, sampleField, type HrrrField } from "./lib/hrrr.ts";
+import { prepareHrrr, renderTile, dbzColor, tempColor, windColor, uvColor, smokeColor, capeColor, sampleField, type HrrrField } from "./lib/hrrr.ts";
 
 const HRRR_BASE = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com";
 const ZOOM_MIN = Number(process.env.ZOOM_MIN ?? 3);
@@ -234,6 +234,86 @@ function smokeStep(fh: number): Step {
            matches: (p) => p[3] === "MASSDEN" && p[4] === "8 m above ground" };
 }
 
+// Surface-based CAPE — the storm chaser's first number, and the one the app
+// had no source for at all. Same cadence/zoom as the other smooth fields.
+function capeStep(fh: number): Step {
+  return { token: `f${fh}`, minute: fh * 60, file: `wrfsfcf${String(fh).padStart(2, "0")}`,
+           matches: (p) => p[3] === "CAPE" && p[4] === "surface" };
+}
+
+// ── severe-weather sounding grid ─────────────────────────────────────────────
+// Not tiles: a coarse grid of the parameters a chaser actually reads off a
+// sounding, so the app can print real numbers and draw a real hodograph at any
+// point instead of sending people to a separate mesoanalysis site.
+//
+// HRRR's surface file already carries all of it — CAPE/CIN, 0-1 and 0-6 km
+// shear *vectors*, 0-1 and 0-3 km storm-relative helicity, and Bunkers storm
+// motion — so a hodograph through surface / 1 km / 6 km is the model's own
+// wind profile, not an interpolation we invented.
+const SND_NX = Number(process.env.SND_NX ?? 120);
+const SND_NY = Number(process.env.SND_NY ?? 60);
+const SOUNDING_LEADS = [1, 3, 6, 9, 12, 15, 18];
+
+function sfc(name: string, level: string) {
+  return (fh: number): Step => ({
+    token: `f${fh}`, minute: fh * 60, file: `wrfsfcf${String(fh).padStart(2, "0")}`,
+    matches: (p) => p[3] === name && p[4] === level,
+  });
+}
+
+const SOUNDING_FIELDS: Record<string, (fh: number) => Step> = {
+  cape: sfc("CAPE", "surface"),
+  cin: sfc("CIN", "surface"),
+  mlcape: sfc("CAPE", "180-0 mb above ground"),
+  u10: ugrd10, v10: vgrd10,
+  ushr1: sfc("VUCSH", "0-1000 m above ground"),
+  vshr1: sfc("VVCSH", "0-1000 m above ground"),
+  ushr6: sfc("VUCSH", "0-6000 m above ground"),
+  vshr6: sfc("VVCSH", "0-6000 m above ground"),
+  srh1: sfc("HLCY", "1000-0 m above ground"),
+  srh3: sfc("HLCY", "3000-0 m above ground"),
+  ustm: sfc("USTM", "0-6000 m above ground"),
+  vstm: sfc("VSTM", "0-6000 m above ground"),
+};
+
+async function soundingFrame(run: string, fh: number): Promise<Record<string, unknown> | null> {
+  const grids: Record<string, number[]> = {};
+  for (const [name, step] of Object.entries(SOUNDING_FIELDS)) {
+    const field = await fetchField(run, step(fh));
+    // CAPE without shear is half an answer, so a missing record drops the
+    // whole frame rather than publishing a partial one.
+    if (!field) return null;
+    const out: number[] = [];
+    for (let j = 0; j < SND_NY; j++) {
+      const lat = CONUS.north - (CONUS.north - CONUS.south) * (j + 0.5) / SND_NY;
+      for (let i = 0; i < SND_NX; i++) {
+        const lon = CONUS.west + (CONUS.east - CONUS.west) * (i + 0.5) / SND_NX;
+        const v = sampleField(field, lat, lon);
+        out.push(Number.isFinite(v) ? Math.round(v * 10) / 10 : 0);
+      }
+    }
+    grids[name] = out;
+  }
+  return { valid: validTime(run, fh * 60), ...grids };
+}
+
+/** Write sounding/manifest.json: the severe suite on a coarse CONUS grid. */
+async function renderSoundings(run: string) {
+  const frames: unknown[] = [];
+  for (const fh of SOUNDING_LEADS) {
+    const frame = await soundingFrame(run, fh);
+    if (frame) frames.push(frame);
+  }
+  if (!frames.length) { console.log("sounding: no frames"); return; }
+  const m = {
+    run, updated: new Date().toISOString(),
+    grid: { nx: SND_NX, ny: SND_NY, ...CONUS },
+    frames,
+  };
+  await put("sounding/manifest.json", new TextEncoder().encode(JSON.stringify(m)), "application/json");
+  console.log(`sounding: ${frames.length} frames`);
+}
+
 // ── wind vector field (for the client particle animation) ────────────────────
 // Not tiles: a single compact lat/lon grid of 10 m U/V (m/s) the app advects
 // particles through. Coarse (the flow is smooth) so the JSON stays a few KB.
@@ -340,8 +420,16 @@ async function main() {
   const smokeFrames = await renderProduct("smoke", smokeJobs, smokeColor);
   await writeManifest("smoke", runH, FIELD_ZOOM_MAX, smokeFrames);
 
+  // ── CAPE map (storm-chasing).
+  const capeJobs: Job[] = fLeads.map((l) => ({ run: l.run, step: capeStep(l.fh), zoomMax: l.zoomMax }));
+  const capeFrames = await renderProduct("cape", capeJobs, capeColor);
+  await writeManifest("cape", runH, FIELD_ZOOM_MAX, capeFrames);
+
   // ── Wind vector field (particle animation source).
   await renderWindVectors(runH, runS);
+
+  // ── Severe-weather sounding grid (CAPE/shear/helicity/storm motion).
+  await renderSoundings(runH);
 
   console.log("Done.");
 }
