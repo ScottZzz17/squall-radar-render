@@ -68,7 +68,7 @@ async function latestRun(): Promise<string | null> {
     const ymd = t.toISOString().slice(0, 10).replace(/-/g, "");
     const hh = String(t.getUTCHours()).padStart(2, "0");
     const url = `${HRRR_BASE}/hrrr.${ymd}/conus/hrrr.t${hh}z.wrfsfcf01.grib2.idx`;
-    const r = await fetch(url, { headers: { Range: "bytes=0-16" } });
+    const r = await withRetry("run probe", () => fetch(url, { headers: { Range: "bytes=0-16" } }));
     if (r.ok || r.status === 206) return `${ymd}${hh}`;
   }
   return null;
@@ -84,27 +84,58 @@ async function latestSynopticRun(): Promise<string | null> {
     const ymd = t.toISOString().slice(0, 10).replace(/-/g, "");
     const hh = String(t.getUTCHours()).padStart(2, "0");
     const url = `${HRRR_BASE}/hrrr.${ymd}/conus/hrrr.t${hh}z.wrfsfcf24.grib2.idx`;
-    const r = await fetch(url, { headers: { Range: "bytes=0-16" } });
+    const r = await withRetry("run probe", () => fetch(url, { headers: { Range: "bytes=0-16" } }));
     if (r.ok || r.status === 206) return `${ymd}${hh}`;
   }
   return null;
 }
 
-/** Range-fetch + decode one step's REFC field; null if the file/record is absent. */
+/** NOAA's S3 bucket sometimes drops a connection mid-download ("other side
+ *  closed"). Retry a few times with backoff before giving up on a request. */
+async function withRetry<T>(what: string, attempt: () => Promise<T>, tries = 4): Promise<T> {
+  let last: unknown;
+  for (let n = 1; n <= tries; n++) {
+    try { return await attempt(); } catch (e) {
+      last = e;
+      if (n < tries) {
+        const wait = 1500 * 2 ** (n - 1);
+        console.log(`  retry ${n}/${tries - 1} for ${what} in ${wait} ms (${(e as Error).message})`);
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    }
+  }
+  throw last;
+}
+
+/** Range-fetch + decode one step's field; null if the file/record is absent —
+ *  or if it still can't be downloaded after retries, so one bad frame is
+ *  skipped instead of failing the whole run. */
 async function fetchField(run: string, step: Step): Promise<HrrrField | null> {
   const ymd = run.slice(0, 8), hh = run.slice(8, 10);
   const base = `${HRRR_BASE}/hrrr.${ymd}/conus/hrrr.t${hh}z.${step.file}.grib2`;
-  const idxRes = await fetch(base + ".idx");
-  if (!idxRes.ok) return null;
-  const lines = (await idxRes.text()).split("\n").filter(Boolean);
-  const i = lines.findIndex((l) => step.matches(l.split(":")));
-  if (i < 0) return null;
-  const start = parseInt(lines[i].split(":")[1], 10);
-  const end = i + 1 < lines.length ? parseInt(lines[i + 1].split(":")[1], 10) : 0;
-  const range = end > start ? `bytes=${start}-${end - 1}` : `bytes=${start}-`;
-  const res = await fetch(base, { headers: { Range: range } });
-  if (!res.ok && res.status !== 206) return null;
-  return prepareHrrr(new Uint8Array(await res.arrayBuffer()));
+  try {
+    const idx = await withRetry(`${step.file}.idx`, async () => {
+      const r = await fetch(base + ".idx");
+      return r.ok ? await r.text() : null;
+    });
+    if (idx == null) return null;
+    const lines = idx.split("\n").filter(Boolean);
+    const i = lines.findIndex((l) => step.matches(l.split(":")));
+    if (i < 0) return null;
+    const start = parseInt(lines[i].split(":")[1], 10);
+    const end = i + 1 < lines.length ? parseInt(lines[i + 1].split(":")[1], 10) : 0;
+    const range = end > start ? `bytes=${start}-${end - 1}` : `bytes=${start}-`;
+    // The body read is inside the retry: the socket usually drops mid-body.
+    const bytes = await withRetry(`${step.file} ${range}`, async () => {
+      const res = await fetch(base, { headers: { Range: range } });
+      if (!res.ok && res.status !== 206) return null;
+      return new Uint8Array(await res.arrayBuffer());
+    });
+    return bytes ? prepareHrrr(bytes) : null;
+  } catch (e) {
+    console.log(`  ${step.file} ${step.token}: download failed after retries, skipped (${(e as Error).message})`);
+    return null;
+  }
 }
 
 // ── tile enumeration ─────────────────────────────────────────────────────────
