@@ -7,11 +7,14 @@
   "license": "MIT",
   "scripts": {
     "render": "tsx render.ts",
-    "mrms": "tsx mrms.ts"
+    "mrms": "tsx mrms.ts",
+    "opera": "tsx opera.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.658.0",
     "fast-png": "^8.0.0",
+    "geotiff": "^3.0.5",
+    "proj4": "^2.22.0",
     "tsx": "^4.19.0"
   }
 }
