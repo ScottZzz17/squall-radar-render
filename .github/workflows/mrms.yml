@@ -5,7 +5,7 @@ name: render-mrms
 # the Worker falls back to IEM if the manifest is over 15 min old).
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch: {}
 
 concurrency:

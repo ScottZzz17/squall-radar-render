@@ -1,4 +1,4 @@
-// Squall radar — observed MRMS reflectivity, every ~10 min.
+// Squall radar — observed MRMS reflectivity, every ~15 min (R2 free-tier writes).
 //
 // Takes the newest NOAA MRMS MergedReflectivityQCComposite (CONUS, 0.01°,
 // ~2 min cadence, public domain) from the AWS Open Data bucket, renders
@@ -17,7 +17,7 @@ const ZOOM_MIN = 3;
 // z6 keeps ~4.3k runs/month × non-empty tiles inside R2's free writes next to
 // HRRR; the app over-zooms. Raise once this runs on our own server.
 const ZOOM_MAX = Number(process.env.MRMS_ZOOM_MAX ?? 6);
-const KEEP_MIN = 60;
+const KEEP_MIN = 65;
 const CONUS = { west: -126, east: -66, south: 22, north: 51 };
 
 const DRY_RUN = !!process.env.DRY_RUN;
@@ -44,13 +44,13 @@ async function recentKeys(): Promise<string[]> {
   return keys.sort();
 }
 
-/** The newest file, then one per ~10 min back through the hour. */
+/** The newest file, then one per ~15 min back through the hour. */
 function loopKeys(keys: string[]): string[] {
   const picked: string[] = [];
   let last = Infinity;
   for (const k of [...keys].reverse()) {
     const t = Date.parse(frameOf(k).valid);
-    if (last - t >= 9 * 60_000) { picked.push(k); last = t; }
+    if (last - t >= 14 * 60_000) { picked.push(k); last = t; }
   }
   return picked.reverse();
 }
