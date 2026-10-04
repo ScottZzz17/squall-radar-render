@@ -6,7 +6,8 @@
   "description": "Pre-renders NOAA HRRR composite-reflectivity forecast tiles to Cloudflare R2 for the Squall weather app.",
   "license": "MIT",
   "scripts": {
-    "render": "tsx render.ts"
+    "render": "tsx render.ts",
+    "mrms": "tsx mrms.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.658.0",
