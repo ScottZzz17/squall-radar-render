@@ -31,15 +31,34 @@ const s3 = DRY_RUN ? null : new S3Client({
 
 interface Frame { token: string; valid: string }
 
-async function latestKey(): Promise<string | null> {
-  for (const back of [0, 1]) {
-    const day = new Date(Date.now() - back * 86_400_000).toISOString().slice(0, 10).replace(/-/g, "");
+/** MRMS files from the last ~70 min, oldest first. */
+async function recentKeys(): Promise<string[]> {
+  const since = new Date(Date.now() - 70 * 60_000);
+  const days = [...new Set([since, new Date()].map((d) => d.toISOString().slice(0, 10).replace(/-/g, "")))];
+  const keys: string[] = [];
+  for (const day of days) {
     const r = await fetch(`${BASE}/?list-type=2&prefix=${PRODUCT}/${day}/`
-      + `&start-after=${PRODUCT}/${day}/MRMS_MergedReflectivityQCComposite_00.50_${stamp(new Date(Date.now() - 20 * 60_000))}`);
-    const keys = [...(await r.text()).matchAll(/<Key>([^<]+)<\/Key>/g)].map((m) => m[1]);
-    if (keys.length) return keys[keys.length - 1];
+      + `&start-after=${PRODUCT}/${day}/MRMS_MergedReflectivityQCComposite_00.50_${stamp(since)}`);
+    keys.push(...[...(await r.text()).matchAll(/<Key>([^<]+)<\/Key>/g)].map((m) => m[1]));
   }
-  return null;
+  return keys.sort();
+}
+
+/** The newest file, then one per ~10 min back through the hour. */
+function loopKeys(keys: string[]): string[] {
+  const picked: string[] = [];
+  let last = Infinity;
+  for (const k of [...keys].reverse()) {
+    const t = Date.parse(frameOf(k).valid);
+    if (last - t >= 9 * 60_000) { picked.push(k); last = t; }
+  }
+  return picked.reverse();
+}
+
+function frameOf(key: string): Frame {
+  const m = key.match(/_(\d{8})-(\d{2})(\d{2})(\d{2})\.grib2\.gz$/)!;
+  return { token: `${m[1]}${m[2]}${m[3]}`,
+           valid: `${m[1].slice(0, 4)}-${m[1].slice(4, 6)}-${m[1].slice(6)}T${m[2]}:${m[3]}:${m[4]}Z` };
 }
 
 function stamp(d: Date) { return d.toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15); }
@@ -63,25 +82,15 @@ async function oldFrames(): Promise<Frame[]> {
   } catch { return []; }
 }
 
-async function main() {
-  const key = await latestKey();
-  if (!key) { console.error("no recent MRMS file"); process.exit(1); }
-  const m = key.match(/_(\d{8})-(\d{2})(\d{2})(\d{2})\.grib2\.gz$/)!;
-  const token = `${m[1]}${m[2]}${m[3]}`;
-  const valid = `${m[1].slice(0, 4)}-${m[1].slice(4, 6)}-${m[1].slice(6)}T${m[2]}:${m[3]}:${m[4]}Z`;
-  const frames = await oldFrames();
-  if (frames.some((f) => f.token === token)) { console.log(`${token} already rendered`); return; }
-
-  console.log(`MRMS ${valid}`);
+async function renderFrame(key: string, f: Frame) {
   const gz = new Uint8Array(await (await fetch(`${BASE}/${key}`)).arrayBuffer());
   const field = decodeMrms(new Uint8Array(gunzipSync(gz)));
-
   const tiles: { key: string; png: Uint8Array }[] = [];
   for (let z = ZOOM_MIN; z <= ZOOM_MAX; z++) {
     for (let x = lon2x(CONUS.west, z); x <= lon2x(CONUS.east, z); x++) {
       for (let y = lat2y(CONUS.north, z); y <= lat2y(CONUS.south, z); y++) {
         const png = renderMrmsTile(field, z, x, y);
-        if (png) tiles.push({ key: `mrms/${token}/${z}/${x}/${y}.png`, png });
+        if (png) tiles.push({ key: `mrms/${f.token}/${z}/${x}/${y}.png`, png });
       }
     }
   }
@@ -89,11 +98,23 @@ async function main() {
   await Promise.all(Array.from({ length: 24 }, async () => {
     while (i < tiles.length) { const t = tiles[i++]; await put(t.key, t.png, "image/png", "public, max-age=86400"); }
   }));
-  console.log(`${tiles.length} tiles`);
+  console.log(`${f.valid}: ${tiles.length} tiles`);
+}
 
+async function main() {
+  const keys = loopKeys(await recentKeys());
+  if (!keys.length) { console.error("no recent MRMS files"); process.exit(1); }
+  const frames = await oldFrames();
+  const have = new Set(frames.map((f) => f.token));
+  // Fill the whole past hour (first run, or after missed schedules), not just now.
+  for (const k of keys) {
+    const f = frameOf(k);
+    if (have.has(f.token)) continue;
+    await renderFrame(k, f);
+    frames.push(f); have.add(f.token);
+  }
   const cutoff = Date.now() - KEEP_MIN * 60_000;
-  const kept = [...frames, { token, valid }]
-    .filter((f) => Date.parse(f.valid) >= cutoff)
+  const kept = frames.filter((f) => Date.parse(f.valid) >= cutoff)
     .sort((a, b) => Date.parse(a.valid) - Date.parse(b.valid));
   const manifest = { updated: new Date().toISOString(), zoomMax: ZOOM_MAX, frames: kept };
   await put("mrms/manifest.json", new TextEncoder().encode(JSON.stringify(manifest)), "application/json", "no-cache");
