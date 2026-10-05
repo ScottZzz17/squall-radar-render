@@ -152,6 +152,13 @@ def main():
     if not run:
         print("no complete ICON-EU run"); sys.exit(1)
     print("ICON-EU run", run)
+    # Already rendered this run? (the Worker and GitHub may both trigger) — skip.
+    try:
+        req = urllib.request.Request("https://squall-push.scottzaragoza.workers.dev/hrrr/manifest?lat=52.5&lon=-8.5", headers=UA)
+        if json.loads(urllib.request.urlopen(req, timeout=20).read()).get("run") == run:
+            print("already rendered", run); return
+    except Exception:
+        pass
     t0 = datetime.strptime(run, "%Y%m%d%H").replace(tzinfo=timezone.utc)
     frames = {"euhrrr": [], "eutemp": [], "euwind": []}
     prev = grib(run, hh, "tot_prec", 0)

@@ -4,8 +4,7 @@ name: render-icon-eu
 # A run lands ~3 h after its time; render every 3 h. Also dispatched by the
 # Worker cron, since GitHub's own schedule can lag.
 on:
-  schedule:
-    - cron: "40 */3 * * *"
+  # Dispatched by the Worker every 6 h (R2 free-tier writes); manual too.
   workflow_dispatch: {}
 
 concurrency:

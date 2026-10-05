@@ -6,7 +6,7 @@ name: render-hrrr
 # Near-term (0–1h) freshness comes from the app's on-device nowcast, not this.
 on:
   schedule:
-    - cron: "20 */3 * * *" # every 3 h at :20 UTC
+    - cron: "20 */4 * * *" # every 4 h at :20 UTC (R2 free tier, with MRMS/OPERA/ICON-EU)
   workflow_dispatch: {}     # manual "Run workflow" button
 
 # One run at a time; cancel an overlapping older run.
