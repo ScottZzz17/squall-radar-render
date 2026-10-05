@@ -11,6 +11,8 @@ export interface OperaField {
   width: number; height: number;
   x0: number; y0: number; res: number; // top-left corner (m) and pixel size
   values: Float32Array;
+  /** OPERA quality index 0…1 per pixel (0 = not assessed). */
+  quality: Float32Array | null;
   toXY: (lon: number, lat: number) => [number, number];
 }
 
@@ -23,10 +25,12 @@ export async function decodeOpera(buf: ArrayBuffer): Promise<OperaField> {
   const fwd = proj4("EPSG:4326", def);
   const [minX, , , maxY] = im.getBoundingBox();
   const [res] = im.getResolution();
-  const [band] = await im.readRasters({ samples: [0] });
+  const bands = await im.readRasters();
+  const band = bands[0];
+  const quality = bands.length > 1 ? (bands[1] as unknown as Float32Array) : null;
   return {
     width: im.getWidth(), height: im.getHeight(), x0: minX, y0: maxY, res,
-    values: band as unknown as Float32Array,
+    values: band as unknown as Float32Array, quality,
     toXY: (lon, lat) => fwd.forward([lon, lat]) as [number, number],
   };
 }
@@ -35,7 +39,12 @@ export function sampleOpera(f: OperaField, lat: number, lon: number): number {
   const [x, y] = f.toXY(lon, lat);
   const i = Math.floor((x - f.x0) / f.res), j = Math.floor((f.y0 - y) / f.res);
   if (i < 0 || i >= f.width || j < 0 || j >= f.height) return NaN;
-  const v = f.values[j * f.width + i];
+  const k = j * f.width + i;
+  const v = f.values[k];
+  // Pixels OPERA itself flags as low quality (clutter round a radar site,
+  // sea clutter, anaprop): 0 < QI < 0.3. QI 0 = not assessed — kept.
+  const q = f.quality ? f.quality[k] : 0;
+  if (q > 0 && q < 0.3) return NaN;
   return Number.isFinite(v) && v > -50 ? v : NaN;
 }
 
