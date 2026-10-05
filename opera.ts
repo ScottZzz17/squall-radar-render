@@ -5,7 +5,7 @@
 // The Worker serves it as the observed radar for coordinates in this box.
 
 import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
-import { decodeOpera, renderOperaTile } from "./lib/opera.ts";
+import { ClutterMap, decodeOpera, renderOperaTile, type OperaField } from "./lib/opera.ts";
 
 const BASE = "https://s3.waw3-1.cloudferro.com/openradar-24h";
 const ZOOM_MIN = 3;
@@ -72,9 +72,40 @@ async function oldFrames(): Promise<Frame[]> {
   } catch { return []; }
 }
 
-async function renderFrame(key: string, f: Frame) {
+async function loadField(key: string): Promise<OperaField> {
   const buf = await (await fetch(`${BASE}/${key.split("/").map(encodeURIComponent).join("/")}`)).arrayBuffer();
-  const field = await decodeOpera(buf);
+  return decodeOpera(buf);
+}
+
+/** The clutter map from R2, or learned from the last 24 h on first run. */
+async function clutterMap(sample: OperaField): Promise<ClutterMap> {
+  if (s3) {
+    try {
+      const r = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: "opera/clutter.bin" }));
+      return ClutterMap.decode(await r.Body!.transformToByteArray());
+    } catch { /* first run */ }
+  }
+  const map = ClutterMap.forBox(sample, BOX);
+  const since = Date.now() - 24 * 3_600_000;
+  const days = [...new Set([new Date(since), new Date()].map((d) => d.toISOString().slice(0, 10).replace(/-/g, "/")))];
+  const keys: string[] = [];
+  for (const day of days) {
+    const r = await fetch(`${BASE}/?list-type=2&prefix=${day}/OPERA/COMP/&max-keys=1000`);
+    keys.push(...[...(await r.text()).matchAll(/<Key>([^<]+@DBZH\.tiff)<\/Key>/g)].map((m) => m[1])
+      .filter((k) => Date.parse(frameOf(k).valid) >= since && frameOf(k).valid.slice(14, 16) === "00"));
+  }
+  console.log(`learning clutter from ${keys.length} hourly frames`);
+  for (const k of keys.sort()) map.update(await loadField(k), 0.12);
+  return map;
+}
+
+let clutter: ClutterMap | null = null;
+
+async function renderFrame(key: string, f: Frame) {
+  const field = await loadField(key);
+  clutter ??= await clutterMap(field);
+  clutter.update(field, 0.02);
+  field.clutter = clutter;
   const tiles: { key: string; png: Uint8Array }[] = [];
   for (let z = ZOOM_MIN; z <= ZOOM_MAX; z++) {
     for (let x = lon2x(BOX.west, z); x <= lon2x(BOX.east, z); x++) {
@@ -107,6 +138,7 @@ async function main() {
     .sort((a, b) => Date.parse(a.valid) - Date.parse(b.valid));
   const manifest = { updated: new Date().toISOString(), zoomMax: ZOOM_MAX, bbox: BOX, frames: kept };
   await put("opera/manifest.json", new TextEncoder().encode(JSON.stringify(manifest)), "application/json", "no-cache");
+  if (clutter) await put("opera/clutter.bin", clutter.encode(), "application/octet-stream", "no-cache");
   console.log(`manifest: ${kept.length} frames`);
 }
 

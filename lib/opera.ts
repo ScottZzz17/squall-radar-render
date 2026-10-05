@@ -13,6 +13,8 @@ export interface OperaField {
   values: Float32Array;
   /** OPERA quality index 0…1 per pixel (0 = not assessed). */
   quality: Float32Array | null;
+  /** Ground-clutter persistence map (see ClutterMap); masked pixels → no echo. */
+  clutter?: ClutterMap;
   toXY: (lon: number, lat: number) => [number, number];
 }
 
@@ -45,6 +47,7 @@ export function sampleOpera(f: OperaField, lat: number, lon: number): number {
   // sea clutter, anaprop): 0 < QI < 0.3. QI 0 = not assessed — kept.
   const q = f.quality ? f.quality[k] : 0;
   if (q > 0 && q < 0.3) return NaN;
+  if (f.clutter && f.clutter.isClutter(i, j)) return NaN;
   return Number.isFinite(v) && v > -50 ? v : NaN;
 }
 
@@ -74,4 +77,58 @@ export function renderOperaTile(f: OperaField, z: number, x: number, y: number):
     }
   }
   return any ? encodePng({ width: TILE, height: TILE, data: rgba, channels: 4, depth: 8 }) : null;
+}
+
+
+/** Echo persistence per pixel over a region: an exponential average of
+ *  "had ≥ 20 dBZ" across frames. Rain moves; ground clutter (round radar
+ *  sites, hills, wind farms) stays lit in the same pixels nearly every frame,
+ *  so pixels lit for hours on end (a run of ~4 h at the seed rate, ~2–3 h at the per-frame rate) are masked. Stored as Uint8 (0–255). */
+export class ClutterMap {
+  constructor(public i0: number, public j0: number, public w: number, public h: number, public data: Uint8Array) {}
+
+  static forBox(f: OperaField, box: { west: number; east: number; south: number; north: number }): ClutterMap {
+    let i0 = Infinity, j0 = Infinity, i1 = -Infinity, j1 = -Infinity;
+    for (let a = 0; a <= 20; a++) for (const [lat, lon] of [
+      [box.south + (box.north - box.south) * a / 20, box.west], [box.south + (box.north - box.south) * a / 20, box.east],
+      [box.south, box.west + (box.east - box.west) * a / 20], [box.north, box.west + (box.east - box.west) * a / 20],
+    ]) {
+      const [x, y] = f.toXY(lon, lat);
+      const i = Math.floor((x - f.x0) / f.res), j = Math.floor((f.y0 - y) / f.res);
+      i0 = Math.min(i0, i); j0 = Math.min(j0, j); i1 = Math.max(i1, i); j1 = Math.max(j1, j);
+    }
+    const w = i1 - i0 + 1, h = j1 - j0 + 1;
+    return new ClutterMap(i0, j0, w, h, new Uint8Array(w * h));
+  }
+
+  static decode(buf: Uint8Array): ClutterMap {
+    const v = new DataView(buf.buffer, buf.byteOffset, 16);
+    return new ClutterMap(v.getInt32(0), v.getInt32(4), v.getInt32(8), v.getInt32(12), buf.slice(16));
+  }
+
+  encode(): Uint8Array {
+    const out = new Uint8Array(16 + this.data.length);
+    const v = new DataView(out.buffer);
+    v.setInt32(0, this.i0); v.setInt32(4, this.j0); v.setInt32(8, this.w); v.setInt32(12, this.h);
+    out.set(this.data, 16);
+    return out;
+  }
+
+  /** Fold one frame in (alpha = weight of the new frame). */
+  update(f: OperaField, alpha: number) {
+    for (let j = 0; j < this.h; j++) for (let i = 0; i < this.w; i++) {
+      const gi = this.i0 + i, gj = this.j0 + j;
+      if (gi < 0 || gj < 0 || gi >= f.width || gj >= f.height) continue;
+      const v = f.values[gj * f.width + gi];
+      const lit = Number.isFinite(v) && v >= 20 ? 255 : 0;
+      const k = j * this.w + i;
+      this.data[k] = Math.round(this.data[k] * (1 - alpha) + lit * alpha);
+    }
+  }
+
+  isClutter(gi: number, gj: number): boolean {
+    const i = gi - this.i0, j = gj - this.j0;
+    if (i < 0 || j < 0 || i >= this.w || j >= this.h) return false;
+    return this.data[j * this.w + i] >= 110;
+  }
 }
