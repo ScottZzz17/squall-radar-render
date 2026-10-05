@@ -147,6 +147,18 @@ def render(prefix, run, step, values_fn, ramp, transparent_below=None):
     return len(jobs)
 
 
+VEC_NX, VEC_NY = 84, 69   # ~0.17° — the flow is smooth, keep the JSON small
+
+
+def wind_vectors(u, v, valid):
+    """10 m U/V (m/s) on a coarse lat/lon grid, row-major, j=0 = north."""
+    lat = BOX["north"] - (BOX["north"] - BOX["south"]) * (np.arange(VEC_NY) + 0.5) / VEC_NY
+    lon = BOX["west"] + (BOX["east"] - BOX["west"]) * (np.arange(VEC_NX) + 0.5) / VEC_NX
+    la, lo = np.meshgrid(lat, lon, indexing="ij")
+    uu, vv = np.nan_to_num(u.sample(la, lo)), np.nan_to_num(v.sample(la, lo))
+    return {"valid": valid, "u": np.round(uu, 1).ravel().tolist(), "v": np.round(vv, 1).ravel().tolist()}
+
+
 def main():
     run, hh = latest_run()
     if not run:
@@ -154,6 +166,7 @@ def main():
     print("ICON-EU run", run)
     # Already rendered this run? (the Worker and GitHub may both trigger) — skip.
     try:
+        if os.environ.get("FORCE"): raise RuntimeError("forced")
         req = urllib.request.Request("https://squall-push.scottzaragoza.workers.dev/hrrr/manifest?lat=52.5&lon=-8.5", headers=UA)
         if json.loads(urllib.request.urlopen(req, timeout=20).read()).get("run") == run:
             print("already rendered", run); return
@@ -161,6 +174,7 @@ def main():
         pass
     t0 = datetime.strptime(run, "%Y%m%d%H").replace(tzinfo=timezone.utc)
     frames = {"euhrrr": [], "eutemp": [], "euwind": []}
+    vec_frames = []   # U/V grids for the app's animated wind (same shape as the US windvec)
     prev = grib(run, hh, "tot_prec", 0)
     for h in HOURS:
         valid = (t0 + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -179,11 +193,16 @@ def main():
             u, v = grib(run, hh, "u_10m", h), grib(run, hh, "v_10m", h)
             render("euwind", run, h, lambda la, lo: np.hypot(u.sample(la, lo), v.sample(la, lo)) * 2.236936, WIND_MPH)
             frames["euwind"].append({"token": f"{run}/e{h}", "valid": valid, "zoomMax": ZOOM_MAX})
+            vec_frames.append(wind_vectors(u, v, valid))
         print(f"+{h}h: {n} radar tiles")
     for prefix, fr in frames.items():
         m = {"run": run, "updated": datetime.now(timezone.utc).isoformat(), "zoomMax": ZOOM_MAX,
              "source": "DWD ICON-EU (CC BY 4.0)", "frames": fr}
         put(f"{prefix}/manifest.json", json.dumps(m).encode(), "application/json", "no-cache")
+    if vec_frames:
+        m = {"run": run, "updated": datetime.now(timezone.utc).isoformat(), "bounds": BOX,
+             "nx": VEC_NX, "ny": VEC_NY, "source": "DWD ICON-EU (CC BY 4.0)", "frames": vec_frames}
+        put("euwindvec/manifest.json", json.dumps(m, separators=(",", ":")).encode(), "application/json", "no-cache")
     print("done")
 
 
