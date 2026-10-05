@@ -5,7 +5,11 @@ name: render-icon-eu
 # Worker cron, since GitHub's own schedule can lag.
 on:
   # Dispatched by the Worker every 6 h (R2 free-tier writes); manual too.
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Re-render even if this run is already done
+        default: ""
 
 concurrency:
   group: render-icon-eu
@@ -23,6 +27,7 @@ jobs:
       - run: pip install eccodes eccodeslib numpy pillow boto3
       - run: python icon_eu.py
         env:
+          FORCE: ${{ inputs.force }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
