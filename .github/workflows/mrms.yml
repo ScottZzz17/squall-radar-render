@@ -3,9 +3,10 @@ name: render-mrms
 # Observed radar: newest NOAA MRMS composite → R2 every ~10 min (public repo,
 # so Actions minutes are free; GitHub may delay schedules a few minutes —
 # the Worker falls back to IEM if the manifest is over 15 min old).
+# Triggered only by the squall-push Worker (4×/hour). A GitHub schedule here
+# as well doubled the runs — and the R2 writes — which pushed the account
+# past R2's 1M free Class A operations and onto a $4.50 bill.
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch: {}
 
 concurrency:
