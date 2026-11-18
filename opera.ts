@@ -98,9 +98,20 @@ async function oldFrames(): Promise<Frame[]> {
   } catch { return []; }
 }
 
+/** One composite, with a few retries: the backup host drops connections
+ *  now and then, and one dropped download shouldn't cost the whole run. */
 async function loadField(key: string): Promise<OperaField> {
-  const buf = await (await fetch(`${BASE}/${key.split("/").map(encodeURIComponent).join("/")}`)).arrayBuffer();
-  return decodeOpera(buf);
+  const url = `${BASE}/${key.split("/").map(encodeURIComponent).join("/")}`;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return decodeOpera(await r.arrayBuffer());
+    } catch (e) {
+      if (attempt >= 4) throw e;
+      await new Promise((ok) => setTimeout(ok, attempt * 2_000));
+    }
+  }
 }
 
 /** The clutter map from R2, or learned from the last 24 h on first run. */
@@ -116,7 +127,11 @@ async function clutterMap(sample: OperaField): Promise<ClutterMap> {
   const keys = (await listDBZH(BASE, daysSince(since)))
     .filter((k) => Date.parse(frameOf(k).valid) >= since && frameOf(k).valid.slice(14, 16) === "00");
   console.log(`learning clutter from ${keys.length} hourly frames`);
-  for (const k of keys.sort()) map.update(await loadField(k), 0.12);
+  for (const k of keys.sort()) {
+    // A frame that still won't download is skipped; the map learns from the rest.
+    const field = await loadField(k).catch((e) => { console.log(`skipped ${k}: ${e}`); return null; });
+    if (field) map.update(field, 0.12);
+  }
   return map;
 }
 
