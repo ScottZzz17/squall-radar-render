@@ -7,7 +7,14 @@
 import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { ClutterMap, decodeOpera, renderOperaTile, type OperaField } from "./lib/opera.ts";
 
-const BASE = "https://s3.waw3-1.cloudferro.com/openradar-24h";
+// The OPERA 24 h cache, then the backup EUMETNET moved it to after a problem
+// at its cloud provider (the primary has had no composites since late Oct
+// 2026). Same layout in both; we use whichever has the last hour.
+const BASES = [
+  "https://s3.waw3-1.cloudferro.com/openradar-24h",
+  "https://object-store.os-api.cci1.ecmwf.int/openradar-24h-backup",
+];
+let BASE = BASES[0];
 const ZOOM_MIN = 3;
 const ZOOM_MAX = Number(process.env.OPERA_ZOOM_MAX ?? 6);
 const KEEP_MIN = 65;
@@ -31,16 +38,35 @@ function frameOf(key: string): Frame {
            valid: `${m[1].slice(0, 4)}-${m[1].slice(4, 6)}-${m[1].slice(6)}T${m[2]}:${m[3]}:00Z` };
 }
 
-async function recentKeys(): Promise<string[]> {
-  const since = Date.now() - 70 * 60_000;
-  const days = [...new Set([new Date(since), new Date()].map((d) => d.toISOString().slice(0, 10).replace(/-/g, "/")))];
+/** Every DBZH GeoTIFF key for the given UTC days. A full day is ~1,150
+ *  objects across all products, so follow the listing past its 1,000 cap. */
+async function listDBZH(base: string, days: string[]): Promise<string[]> {
   const keys: string[] = [];
   for (const day of days) {
-    const r = await fetch(`${BASE}/?list-type=2&prefix=${day}/OPERA/COMP/&max-keys=1000`);
-    keys.push(...[...(await r.text()).matchAll(/<Key>([^<]+@DBZH\.tiff)<\/Key>/g)].map((m) => m[1])
-      .filter((k) => Date.parse(frameOf(k).valid) >= since));
+    let token: string | undefined;
+    do {
+      const url = `${base}/?list-type=2&prefix=${day}/OPERA/COMP/&max-keys=1000` +
+        (token ? `&continuation-token=${encodeURIComponent(token)}` : "");
+      const r = await fetch(url).catch(() => null);
+      if (!r?.ok) break;
+      const xml = await r.text();
+      keys.push(...[...xml.matchAll(/<Key>([^<]+@DBZH\.tiff)<\/Key>/g)].map((m) => m[1]));
+      token = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/)?.[1];
+    } while (token);
   }
-  return keys.sort();
+  return keys;
+}
+
+const daysSince = (since: number) =>
+  [...new Set([new Date(since), new Date()].map((d) => d.toISOString().slice(0, 10).replace(/-/g, "/")))];
+
+async function recentKeys(): Promise<string[]> {
+  const since = Date.now() - 70 * 60_000;
+  for (const base of BASES) {
+    const keys = (await listDBZH(base, daysSince(since))).filter((k) => Date.parse(frameOf(k).valid) >= since);
+    if (keys.length) { BASE = base; console.log(`OPERA source: ${base}`); return keys.sort(); }
+  }
+  return [];
 }
 
 function loopKeys(keys: string[]): string[] {
@@ -87,13 +113,8 @@ async function clutterMap(sample: OperaField): Promise<ClutterMap> {
   }
   const map = ClutterMap.forBox(sample, BOX);
   const since = Date.now() - 24 * 3_600_000;
-  const days = [...new Set([new Date(since), new Date()].map((d) => d.toISOString().slice(0, 10).replace(/-/g, "/")))];
-  const keys: string[] = [];
-  for (const day of days) {
-    const r = await fetch(`${BASE}/?list-type=2&prefix=${day}/OPERA/COMP/&max-keys=1000`);
-    keys.push(...[...(await r.text()).matchAll(/<Key>([^<]+@DBZH\.tiff)<\/Key>/g)].map((m) => m[1])
-      .filter((k) => Date.parse(frameOf(k).valid) >= since && frameOf(k).valid.slice(14, 16) === "00"));
-  }
+  const keys = (await listDBZH(BASE, daysSince(since)))
+    .filter((k) => Date.parse(frameOf(k).valid) >= since && frameOf(k).valid.slice(14, 16) === "00");
   console.log(`learning clutter from ${keys.length} hourly frames`);
   for (const k of keys.sort()) map.update(await loadField(k), 0.12);
   return map;
